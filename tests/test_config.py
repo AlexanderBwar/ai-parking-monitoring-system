@@ -99,7 +99,7 @@ def test_repository_config_loads_from_another_working_directory(
     assert config.detector.checkpoint_path == (
         root / "runs/baseline-001/checkpoints/checkpoint0019.pth"
     )
-    assert config.detector.score_threshold == 0.6
+    assert config.detector.score_threshold == 0.5
     assert config.ocr.use_angle_cls is False
     assert config.storage.database_path == root / "artifacts/mvp/observations.sqlite3"
 

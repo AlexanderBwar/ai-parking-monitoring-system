@@ -4,6 +4,8 @@
 /artifacts/mvp/*
 !/artifacts/mvp/.gitkeep
 /models/
+/runs/baseline-001/checkpoints/
+/runs/baseline-001/eval-epoch19/error-analysis-mvp/
 
 # Data folder 
 /data/raw/*

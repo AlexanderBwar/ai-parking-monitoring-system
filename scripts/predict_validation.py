@@ -16,9 +16,10 @@ from pathlib import Path
 
 import torch
 from PIL import Image, ImageDraw
-
 from visualize_coco import FONT_SIZE_SCALE, color_for, load_font
 from visualize_coco_sizes import box_line_width
+
+from parking_monitoring.config import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "thrid-party/RT-DETR/rtdetrv2_pytorch"))
@@ -151,17 +152,21 @@ def main() -> int:
                         help="Print predictions without drawing or saving images")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--score-threshold", type=float, default=0.6)
+    parser.add_argument("--score-threshold", type=float,
+                        help="Override the drawing cutoff from configs/mvp.yaml")
     parser.add_argument("--limit", type=int, help="Only process the first N images for a preview")
     args = parser.parse_args()
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("--batch-size and --limit must be positive")
-    if not 0 <= args.score_threshold <= 1:
+    if args.score_threshold is not None and not 0 <= args.score_threshold <= 1:
         parser.error("--score-threshold must be between 0 and 1")
 
     processed = written = displayed = empty = 0
     started = time.monotonic()
     try:
+        score_threshold = args.score_threshold
+        if not args.stdout_only and score_threshold is None:
+            score_threshold = load_config().detector.score_threshold
         config = project_path(args.config)
         checkpoint = project_path(args.resume)
         output_dir = project_path(args.output_dir)
@@ -180,7 +185,7 @@ def main() -> int:
             print("Terminal output only; all returned detections; no images will be saved.",
                   flush=True)
         else:
-            print(f"Display score > {args.score_threshold}", flush=True)
+            print(f"Display score > {score_threshold}", flush=True)
             print(f"Output: {output_dir} (matching image files will be overwritten)", flush=True)
 
         batches = itertools.islice(loader, math.ceil(total / args.batch_size))
@@ -198,7 +203,7 @@ def main() -> int:
                 if not args.stdout_only:
                     source, destination = paths[image_id]
                     count = draw_prediction(source, destination, prediction,
-                                            category_names, args.score_threshold)
+                                            category_names, score_threshold)
                     written += 1
                     displayed += count
                     empty += count == 0

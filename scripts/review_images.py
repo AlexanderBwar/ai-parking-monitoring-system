@@ -1,5 +1,6 @@
 """Save selected detection errors as annotated images for manual review."""
 
+import argparse
 import csv
 import json
 import random
@@ -8,16 +9,15 @@ from pathlib import Path
 
 import cv2
 
+if __package__:
+    from .eval_match import DEFAULT_ANALYSIS_DIR, GT_PATH, PREDICTIONS_PATH, ROOT
+else:
+    from eval_match import DEFAULT_ANALYSIS_DIR, GT_PATH, PREDICTIONS_PATH, ROOT
+
 SEED = 0
 N_FN_NOT_DETECTED = 50
 N_FN_LOW_CONF = 10
-SCORE_THRESH = 0.5
-ROOT = Path(__file__).resolve().parent.parent
-MATCHES_PATH = ROOT / "runs/baseline-001/eval-epoch19/error-analysis/matches.csv"
-PREDICTIONS_PATH = ROOT / "runs/baseline-001/eval-epoch19/fresh-evaluation/predictions.json"
-GT_PATH = ROOT / "data/raw/annotations/kaggle_val_annotations.json"
 IMAGES_DIR = ROOT / "data/raw/valid"
-OUTPUT_DIR = ROOT / "runs/baseline-001/eval-epoch19/error-analysis/review"
 
 
 def draw_box(image, box, scale, color, thickness):
@@ -30,7 +30,23 @@ def draw_box(image, box, scale, color, thickness):
 
 def main():
     """Select error rows, draw each target, and save images and blank review tags."""
-    with MATCHES_PATH.open(newline="", encoding="utf-8") as file:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR,
+                        help="Directory containing matches.csv and summary.json")
+    analysis_dir = parser.parse_args().analysis_dir.expanduser()
+    output_dir = analysis_dir / "review"
+    if output_dir.exists() or output_dir.is_symlink():
+        parser.error(f"{output_dir} already exists. Match into a fresh --analysis-dir.")
+    summary_path = analysis_dir / "summary.json"
+    try:
+        with summary_path.open(encoding="utf-8") as file:
+            score_threshold = json.load(file)["score_threshold"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.error(f"Cannot read the cutoff in {summary_path}: {exc}")
+    if type(score_threshold) not in (int, float) or not 0 <= score_threshold <= 1:
+        parser.error(f"Invalid score_threshold in {summary_path}.")
+
+    with (analysis_dir / "matches.csv").open(newline="", encoding="utf-8") as file:
         rows = list(enumerate(csv.DictReader(file)))
     selected = [(index, row) for index, row in rows if row["type"] == "FP"]
     rng = random.Random(SEED)
@@ -53,11 +69,15 @@ def main():
     for annotation in gt["annotations"]:
         gt_by_image[annotation["image_id"]].append(annotation["bbox"])
     for prediction in predictions:
-        if prediction["score"] >= SCORE_THRESH:
+        if prediction["score"] > score_threshold:
             pred_by_image[prediction["image_id"]].append(prediction["bbox"])
 
+    try:
+        output_dir.mkdir()
+    except FileExistsError:
+        parser.error(f"{output_dir} already exists. Match into a fresh --analysis-dir.")
     for folder in ("fp", "fn"):
-        (OUTPUT_DIR / folder).mkdir(parents=True, exist_ok=True)
+        (output_dir / folder).mkdir()
     tags = []
     folder_counts = Counter({"fp": 0, "fn": 0})
     subtype_counts = Counter({
@@ -88,7 +108,7 @@ def main():
         is_fp = row["type"] == "FP"
         prefix = "pred" if is_fp else "gt"
         target = [float(row[f"{prefix}_{axis}"]) for axis in ("x", "y", "w", "h")]
-        draw_box(image, target, scale, (0, 0, 255) if is_fp else (0, 255, 0), 4)
+        draw_box(image, target, scale, (0, 0, 255) if is_fp else (255, 0, 255), 4)
 
         subtype = row["fp_type"] if is_fp else row["fn_type"]
         score_name = "score" if is_fp else "best_overlap_score"
@@ -106,7 +126,7 @@ def main():
 
         folder = row["type"].lower()
         filename = f'{row["type"]}_{subtype}_{image_id}_{index}.jpg'
-        output_path = OUTPUT_DIR / folder / filename
+        output_path = output_dir / folder / filename
         if not cv2.imwrite(str(output_path), image):
             raise OSError(f"Could not save {output_path}")
         tags.append({
@@ -116,12 +136,13 @@ def main():
         folder_counts[folder] += 1
         subtype_counts[subtype] += 1
 
-    with (OUTPUT_DIR / "review_tags.csv").open("w", newline="", encoding="utf-8") as file:
+    with (output_dir / "review_tags.csv").open("x", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=[
             "filename", "type", "subtype", "image_id", "box_area_ratio", "category",
         ])
         writer.writeheader()
         writer.writerows(tags)
+    print(f"Overlay score > {score_threshold}")
     print("Images saved per folder:", dict(folder_counts))
     print("Images saved per subtype:", dict(subtype_counts))
 

@@ -1,18 +1,39 @@
-# AI Parking Monitoring System
+# AI Parking Monitoring System (MVP v0.1)
 
-An object-detection research project centered on fine-tuning RT-DETRv2 to locate license plates. The repository currently provides dataset auditing/selection utilities and a PyTorch RT-DETRv2 training/evaluation implementation. It does not yet implement a complete parking-lot monitoring application.
+This MVP is a local Streamlit app that detects and reads license plates from JPEG and PNG images. It shows detection boxes, plate crops, and OCR results. Saved observations are stored in SQLite and can be reopened from history.
 
-## Current pipeline
+## Run the MVP locally
 
-```text
-Roboflow license-plate images + COCO annotations
-        → audit and inspect data
-        → filter/sample a baseline dataset
-        → RT-DETRv2 license-plate detector
-        → COCO bounding-box evaluation
+Use Python 3.12 and run these commands from the repository root:
+
+```bash
+uv sync --locked
 ```
 
-The detector predicts license-plate bounding boxes. Parking-space occupancy, vehicle tracking, plate reading/OCR, a serving API, and a user interface are not present in the current code.
+Supply the model files listed in `configs/mvp.yaml`:
+
+| Model | Required path |
+|---|---|
+| Fine-tuned RT-DETRv2 | `runs/baseline-001/checkpoints/checkpoint0019.pth` |
+| PaddleOCR text detector | `artifacts/mvp/smoke-test/ocr-models/det/` |
+| PaddleOCR English PP-OCRv4 recognizer | `artifacts/mvp/smoke-test/ocr-models/rec/` |
+| PaddleOCR angle classifier | `artifacts/mvp/smoke-test/ocr-models/cls/` |
+
+The best checkpoint `checkpoint0019.pth` is attached to the GitHub release of this repo. 
+the [artifact manifest](docs/reports/baseline-001/artifact-manifest.json).
+Each OCR directory needs `inference.pdmodel` and `inference.pdiparams`installed.
+The current PaddleOCR setup requires the classifier files even with angle classification disabled.
+
+```bash
+.venv/bin/python -m streamlit run apps/streamlit_app.py
+```
+
+Upload a JPEG or PNG, process it, then save the observation. Select it under
+**Recent history** to reopen the source image, crops, and OCR results after a
+restart. The database is `artifacts/mvp/observations.sqlite3`.
+
+The app keeps detections with scores above `0.50` by default. The 50-crop OCR accuracy evaluation is deferred. 
+The sections below document the detector baseline.
 
 ## Dataset
 
@@ -76,8 +97,8 @@ This evaluates the configured validation split, not an independent test split, a
 
 ## Limitations and next work
 
-- Annotation defects and domain differences limit interpretation of the baseline scores. Structured annotation auditing and quantitative error analysis remain future work.
-- Historical training-code/environment details are incomplete and training was not explicitly seeded. Recreating the metrics table is distinct from reproducing the original training run.
+- Poor annotation quality and domain differences limit the interpretation of the baseline scores. Annotation auditing(important) and quantitative error analysis remain future work.(Error Analysis is currently in progress)
+- Historical training-code/environment details are incomplete and training was not explicitly seeded bec it was run on Kaggle. Recreating the metrics table is distinct from reproducing the original training run. But for the next training runs it will be documented well. 
 - Dataset selection scripts still require path and sampling-setting review before reuse.
 - Independent test performance, representative CCTV evaluation, latency, tracking, OCR, and parking occupancy are not established by this baseline.
 
@@ -85,10 +106,10 @@ This evaluates the configured validation split, not an independent test split, a
 
 ```text
 thrid-party/RT-DETR/rtdetrv2_pytorch/  Detector implementation
-configs/                            Project configs
-scripts/data/                       Dataset audit and selection utilities
-scripts/                            Metric extraction and visualizations
-docs/reports/baseline-001/           Baseline report and selected evidence
-docs/templates/                     Templates, not measured experiment results
-runs/baseline-001/eval-epoch19/       Saved evaluation, metrics, and config snapshots
+configs/                               Project configs
+scripts/data/                          Dataset audit and selection utilities
+scripts/                               Metric extraction and visualizations
+docs/reports/baseline-001/             Baseline report and selected evidence
+docs/templates/                        Templates, not measured experiment results
+runs/baseline-001/eval-epoch19/        Saved evaluation, metrics, and config snapshots
 ```

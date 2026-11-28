@@ -5,7 +5,7 @@ detector:
   checkpoint_path: runs/baseline-001/checkpoints/checkpoint0019.pth
   device: cpu
   # Starting development threshold, not a measured acceptance threshold.
-  score_threshold: 0.6
+  score_threshold: 0.5
 
 ocr:
   engine: paddleocr
