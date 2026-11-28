@@ -1,17 +1,19 @@
 """Match saved plate detections to ground truth for quick error analysis."""
 
+import argparse
 import csv
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-SCORE_THRESH = 0.5
+from parking_monitoring.config import ConfigError, load_config
+
 IOU_THRESH = 0.5
 FN_LOW_CONF_FLOOR = 0.10
 ROOT = Path(__file__).resolve().parent.parent
 PREDICTIONS_PATH = ROOT / "runs/baseline-001/eval-epoch19/fresh-evaluation/predictions.json"
 GT_PATH = ROOT / "data/raw/annotations/kaggle_val_annotations.json"
-OUTPUT_DIR = ROOT / "runs/baseline-001/eval-epoch19/error-analysis"
+DEFAULT_ANALYSIS_DIR = ROOT / "runs/baseline-001/eval-epoch19/error-analysis-mvp"
 COLUMNS = [
     "image_id", "file_name", "type", "fp_type", "score",
     "pred_x", "pred_y", "pred_w", "pred_h",
@@ -54,11 +56,11 @@ def make_row(image, kind, prediction=None, gt_box=None, overlap="", fp_type=""):
     return row
 
 
-def match_image(image, gt_boxes, predictions):
+def match_image(image, gt_boxes, predictions, *, score_threshold: float):
     """Greedily match one image; score ties retain prediction-file order."""
     all_predictions = predictions
     predictions = sorted(
-        (p for p in predictions if p["score"] >= SCORE_THRESH),
+        (p for p in predictions if p["score"] > score_threshold),
         key=lambda p: p["score"], reverse=True,
     )
     matched = set()
@@ -93,7 +95,7 @@ def match_image(image, gt_boxes, predictions):
             row["best_overlap_score"] = (
                 best_overlap_score if best_overlap_score is not None else ""
             )
-            if best_overlap_score is not None and best_overlap_score >= SCORE_THRESH:
+            if best_overlap_score is not None and best_overlap_score > score_threshold:
                 row["fn_type"] = "matched_elsewhere"
             elif best_overlap_score is not None and best_overlap_score >= FN_LOW_CONF_FLOOR:
                 row["fn_type"] = "low_confidence"
@@ -108,32 +110,56 @@ def self_test():
     image = {"id": 1, "file_name": "example.jpg", "width": 100, "height": 100}
     gt = [[10, 10, 20, 20]]
     prediction = {"bbox": [10, 10, 20, 20], "score": 0.9}
+    threshold = 0.5
 
-    rows = match_image(image, gt, [prediction])
+    rows = match_image(image, gt, [prediction], score_threshold=threshold)
     assert [row["type"] for row in rows] == ["TP"]
     assert rows[0]["iou"] == 1.0
 
-    rows = match_image(image, gt, [prediction, {**prediction, "score": 0.8}])
+    rows = match_image(
+        image, gt, [prediction, {**prediction, "score": 0.8}], score_threshold=threshold
+    )
     assert [row["type"] for row in rows] == ["TP", "FP"]
     assert rows[1]["fp_type"] == "duplicate"
 
-    rows = match_image(image, gt, [])
+    rows = match_image(image, gt, [], score_threshold=threshold)
     assert [row["type"] for row in rows] == ["FN"]
     assert rows[0]["fn_type"] == "not_detected"
     assert rows[0]["best_overlap_score"] == ""
-    rows = match_image(image, [], [prediction])
+    rows = match_image(image, [], [prediction], score_threshold=threshold)
     assert [row["type"] for row in rows] == ["FP"]
     assert rows[0]["fp_type"] == "background" and rows[0]["iou"] == ""
-    assert match_image(image, [], []) == []
+    assert match_image(image, [], [], score_threshold=threshold) == []
 
-    rows = match_image(image, gt, [{**prediction, "score": 0.3}])
+    rows = match_image(
+        image, gt, [{**prediction, "score": threshold}], score_threshold=threshold
+    )
     assert [row["type"] for row in rows] == ["FN"]
     assert rows[0]["fn_type"] == "low_confidence"
-    assert rows[0]["best_overlap_score"] == 0.3
+    assert rows[0]["best_overlap_score"] == threshold
+    rows = match_image(
+        image, gt, [{**prediction, "score": 0.51}], score_threshold=threshold
+    )
+    assert [row["type"] for row in rows] == ["TP"]
 
 
 def main():
     """Load, match, check totals, and save the requested CSV and summary."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR,
+                        help="Directory for new matches.csv and summary.json")
+    analysis_dir = parser.parse_args().analysis_dir.expanduser()
+    matches_path = analysis_dir / "matches.csv"
+    summary_path = analysis_dir / "summary.json"
+    review_path = analysis_dir / "review"
+    for path in (matches_path, summary_path, review_path):
+        if path.exists() or path.is_symlink():
+            parser.error(f"{path} already exists. Choose a fresh --analysis-dir.")
+    try:
+        score_threshold = load_config().detector.score_threshold
+    except ConfigError as exc:
+        parser.error(str(exc))
+
     with GT_PATH.open(encoding="utf-8") as file:
         gt = json.load(file)
     with PREDICTIONS_PATH.open(encoding="utf-8") as file:
@@ -151,14 +177,16 @@ def main():
 
     rows = []
     for image_id, image in images.items():
-        rows.extend(match_image(image, gt_by_image[image_id], predictions_by_image[image_id]))
+        rows.extend(match_image(
+            image, gt_by_image[image_id], predictions_by_image[image_id],
+            score_threshold=score_threshold,
+        ))
 
     counts = Counter(row["type"] for row in rows)
     tp, fp, fn = counts["TP"], counts["FP"], counts["FN"]
-    retained_count = sum(p["score"] >= SCORE_THRESH for p in predictions)
-    assert tp + fn == 2195, "TP + FN must equal the 2,195 GT boxes"
+    retained_count = sum(p["score"] > score_threshold for p in predictions)
+    assert tp + fn == len(gt["annotations"]), "TP + FN must equal the number of GT boxes"
     assert tp + fp == retained_count, "TP + FP must equal retained predictions"
-    assert (tp, fp, fn) == (2019, 57, 176), "Matching totals changed"
 
     fp_counts = Counter(row["fp_type"] for row in rows if row["type"] == "FP")
     fn_counts = Counter(row["fn_type"] for row in rows if row["type"] == "FN")
@@ -170,8 +198,8 @@ def main():
         kind: fn_counts[kind]
         for kind in ("matched_elsewhere", "low_confidence", "not_detected")
     }
-    assert sum(fp_type_counts.values()) == 57
-    assert sum(fn_type_counts.values()) == 176
+    assert sum(fp_type_counts.values()) == fp
+    assert sum(fn_type_counts.values()) == fn
 
     precision = tp / (tp + fp) if tp + fp else 0.0
     recall = tp / (tp + fn) if tp + fn else 0.0
@@ -179,19 +207,22 @@ def main():
     summary = {
         "TP": tp, "FP": fp, "FN": fn,
         "precision": precision, "recall": recall, "F1": f1,
-        "score_threshold": SCORE_THRESH, "iou_threshold": IOU_THRESH,
+        "score_threshold": score_threshold, "iou_threshold": IOU_THRESH,
         "fp_type_counts": fp_type_counts,
         "fn_type_counts": fn_type_counts,
     }
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with (OUTPUT_DIR / "matches.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
-    with (OUTPUT_DIR / "summary.json").open("w", encoding="utf-8") as file:
-        json.dump(summary, file, indent=2, allow_nan=False)
-        file.write("\n")
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with matches_path.open("x", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        with summary_path.open("x", encoding="utf-8") as file:
+            json.dump(summary, file, indent=2, allow_nan=False)
+            file.write("\n")
+    except FileExistsError as exc:
+        parser.error(f"{exc.filename} already exists. Choose a fresh --analysis-dir.")
     print(json.dumps(summary, indent=2, allow_nan=False))
 
 
